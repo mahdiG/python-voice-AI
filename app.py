@@ -78,14 +78,15 @@ def capture_user_speech_with_voice_activity_detection(recording_stream, temporar
     speech_detector = webrtcvad.Vad(3) # Maximum aggressiveness against noise
     
     # --- NOISE FLOOR CONFIGURATION ---
-    # 0.005 to 0.015 is typical for laptop mics. Raise this slightly if it still won't stop.
     RMS_VOLUME_THRESHOLD = 0.0001
     
     history_ring_buffer = collections.deque(maxlen=30) # ~0.9 seconds of audio history
     is_actively_recording = False
     recorded_voice_frames = []
     silence_chunk_counter = 0
-    maximum_allowed_silence_chunks = 55 # ~1.2 seconds of silence triggers processing
+    
+    # OPTIMIZATION: Reduced from 55 to 25 (~750ms). Drastically cuts trailing response latency.
+    MAXIMUM_ALLOWED_SILENCE_CHUNKS = 25 
     
     print("\n[System]: 🟢 Listening... (Speak naturally, AI will reply when you pause)")
     recording_stream.start_stream()
@@ -97,8 +98,6 @@ def capture_user_speech_with_voice_activity_detection(recording_stream, temporar
             # Convert raw bytes to a floating-point array to measure absolute volume
             audio_data = np.frombuffer(raw_audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             rms_volume = np.sqrt(np.mean(audio_data ** 2))
-
-            # debug print
             
             # Hybrid check: Must pass WebRTC VAD AND be louder than the laptop's baseline fan noise
             if rms_volume > RMS_VOLUME_THRESHOLD:
@@ -114,7 +113,7 @@ def capture_user_speech_with_voice_activity_detection(recording_stream, temporar
                 number_of_speech_frames = len([frame for frame, is_speech in history_ring_buffer if is_speech])
                 if number_of_speech_frames > 12: # ~0.36 seconds of voice
                     is_actively_recording = True
-                    print("[System]: 🔴 Recording active...")
+                    print("[System]: 🔴 Recording active...                      ")
                     for buffer_frame, _ in history_ring_buffer:
                         recorded_voice_frames.append(buffer_frame)
                     history_ring_buffer.clear()
@@ -125,8 +124,8 @@ def capture_user_speech_with_voice_activity_detection(recording_stream, temporar
                 else:
                     silence_chunk_counter = 0
                     
-                if silence_chunk_counter > maximum_allowed_silence_chunks:
-                    print("[System]: ⏸️ Silence detected. Processing...")
+                if silence_chunk_counter > MAXIMUM_ALLOWED_SILENCE_CHUNKS:
+                    print("[System]: ⏸️ Silence detected. Processing...          ")
                     break
         except IOError:
             continue
@@ -139,10 +138,11 @@ def capture_user_speech_with_voice_activity_detection(recording_stream, temporar
         normalized_audio_signal = integer_audio_array.astype(np.float32) / 32768.0
         sf.write(temporary_audio_path, normalized_audio_signal, RECORDING_SAMPLE_RATE)
 
+
 def stream_large_language_model_text_response(conversation_session, audio_file_path: str):
     """Sends the multi-modal audio file to the engine and yields raw text tokens asynchronously."""
     prompt_package = litert_lm.Contents.of(
-        "You are participating in a fluid vocal conversation.",
+        "You are participating in a fluid, natural vocal conversation. Keep answers concise.",
         litert_lm.Content.AudioFile(absolute_path=audio_file_path)
     )
     
@@ -199,18 +199,45 @@ def synthesize_text_to_audio_worker(tts_pipeline, text_queue: queue.Queue, audio
 
 def process_text_stream_into_queues(text_generator, text_queue: queue.Queue) -> None:
     """
-    Accumulates tokens and extracts complete clauses or sentences.
-    Prevents arbitrary mid-word fragmentation to ensure Kokoro retains a natural human cadence.
+    Accumulates tokens and extracts chunks eagerly. 
+    Uses a highly responsive multi-tier fallback mechanism to feed the TTS pipeline instantly.
     """
     accumulated_text_buffer = ""
     sentence_endings = [".", "?", "!"]
     clause_endings = [",", ";", ":", "—"]
+    is_first_chunk = True
     
     for text_token in text_generator:
         accumulated_text_buffer += text_token
         print(text_token, end="", flush=True)
         
-        # Tier 1: Look for an optimal sentence completion boundary
+        # OPTIMIZATION: Hyper-aggressive chunking for the absolute first phrase 
+        # to guarantee an immediate vocal response start.
+        if is_first_chunk:
+            highest_punctuation_index = -1
+            all_delimiters = sentence_endings + clause_endings
+            for marker in all_delimiters:
+                marker_index = accumulated_text_buffer.find(marker)
+                if marker_index != -1 and (highest_punctuation_index == -1 or marker_index < highest_punctuation_index):
+                    highest_punctuation_index = marker_index
+            
+            # Send immediately if minor/major punctuation is found early, OR we hit a clean word boundary at ~60 chars
+            if highest_punctuation_index != -1 and highest_punctuation_index > 10:
+                first_phrase = accumulated_text_buffer[:highest_punctuation_index + 1].strip()
+                accumulated_text_buffer = accumulated_text_buffer[highest_punctuation_index + 1:]
+                if first_phrase:
+                    text_queue.put(first_phrase)
+                    is_first_chunk = False
+            elif len(accumulated_text_buffer) > 60:
+                last_space_index = accumulated_text_buffer.rfind(" ")
+                if last_space_index > 20:
+                    first_phrase = accumulated_text_buffer[:last_space_index].strip()
+                    accumulated_text_buffer = accumulated_text_buffer[last_space_index:]
+                    text_queue.put(first_phrase)
+                    is_first_chunk = False
+            continue
+
+        # Standard processing pipeline for subsequent text blocks
         highest_sentence_index = -1
         for marker in sentence_endings:
             marker_index = accumulated_text_buffer.rfind(marker)
@@ -220,13 +247,11 @@ def process_text_stream_into_queues(text_generator, text_queue: queue.Queue) -> 
         if highest_sentence_index != -1:
             complete_phrase = accumulated_text_buffer[:highest_sentence_index + 1].strip()
             accumulated_text_buffer = accumulated_text_buffer[highest_sentence_index + 1:]
-            
             if complete_phrase:
                 text_queue.put(complete_phrase)
                 
-        # Tier 2 Fallback: If the text gets long, slice at a clause boundary (like a comma) 
-        # so the pause aligns naturally with a human breath instead of interrupting a phrase.
-        elif len(accumulated_text_buffer) > 200:
+        # Lowered threshold from 200 to 100 characters for smoother, streaming human cadence
+        elif len(accumulated_text_buffer) > 100:
             highest_clause_index = -1
             for marker in clause_endings:
                 marker_index = accumulated_text_buffer.rfind(marker)
@@ -236,14 +261,13 @@ def process_text_stream_into_queues(text_generator, text_queue: queue.Queue) -> 
             if highest_clause_index != -1:
                 complete_phrase = accumulated_text_buffer[:highest_clause_index + 1].strip()
                 accumulated_text_buffer = accumulated_text_buffer[highest_clause_index + 1:]
-                
                 if complete_phrase:
                     text_queue.put(complete_phrase)
             
-            # Tier 3 Safety: Absolute fallback for extreme run-on blocks lacking punctuation
-            elif len(accumulated_text_buffer) > 300:
+            # Absolute fallback safety threshold lowered to 150 characters
+            elif len(accumulated_text_buffer) > 150:
                 last_space_index = accumulated_text_buffer.rfind(" ")
-                if last_space_index > 50:
+                if last_space_index > 30:
                     phrasal_chunk = accumulated_text_buffer[:last_space_index].strip()
                     accumulated_text_buffer = accumulated_text_buffer[last_space_index:]
                     text_queue.put(phrasal_chunk)
@@ -274,8 +298,7 @@ def execute_conversation_pipeline(model_path: str) -> None:
         cache_dir=RUNTIME_CACHE_DIRECTORY
     ) as litert_engine:
         
-        # system_rules = [litert_lm.Message.system("Provide detailed, naturally spoken responses.")]
-        system_rules = [litert_lm.Message.system("")]
+        system_rules = [litert_lm.Message.system("You are a short, conversational, and direct voice assistant.")]
         
         with litert_engine.create_conversation(messages=system_rules) as conversation_session:
             print("[System]: Pipeline active. Talk to your AI companion.")
