@@ -16,35 +16,38 @@ Traditional speech agents run an expensive three-model cascade:
 STT Engine -> LLM -> TTS Engine. This project eliminates the standalone
 Speech-to-Text phase entirely, reducing latency and avoiding data serialization overhead.
 
+```
 [User Audio Input]
-│
-▼
+   │
+   ▼
 ┌──────────────────────────────────────────────┐
-│ Hybrid VAD Layer (WebRTC VAD + RMS Floor) │ ◄── Blocks fan & environmental noise
+│ Hybrid VAD Layer (WebRTC VAD + RMS Floor)    │ ◄── Blocks fan & environmental noise
 └──────────────────────────────────────────────┘
-│
-▼
+   │
+   ▼
 ┌──────────────────────────────────────────────┐
-│ LiteRT-LM Core Engine (Gemma 4 2B Native) │ ◄── Direct audio file ingestion
+│ LiteRT-LM Core Engine (Gemma 4 2B Native)    │ ◄── Direct audio file ingestion
 └──────────────────────────────────────────────┘
-│ (Asynchronous Token Stream)
-▼
+   │ (Asynchronous Token Stream)
+   ▼
 ┌──────────────────────────────────────────────┐
-│ Dynamic Phrase Slicing Parser │ ◄── High-speed phrase/clause chunking
+│ Dynamic Phrase Slicing Parser                │ ◄── High-speed phrase/clause chunking
 └──────────────────────────────────────────────┘
-│ (Eager Queued Text Blocks)
-▼
+   │ (Eager Queued Text Blocks)
+   ▼
 ┌──────────────────────────────────────────────┐
-│ Kokoro 82M Speech Synthesis │ ◄── Parallel TTS Worker Thread
+│ Kokoro 82M Speech Synthesis                  │ ◄── Parallel TTS Worker Thread
 └──────────────────────────────────────────────┘
-│ (Raw Audio Arrays)
-▼
+   │ (Raw Audio Arrays)
+   ▼
 ┌──────────────────────────────────────────────┐
-│ Acoustic Post-Processor (Signal Stitching) │ ◄── Slices trailing dead air/gaps
+│ Acoustic Post-Processor (Signal Stitching)   │ ◄── Slices trailing dead air/gaps
 └──────────────────────────────────────────────┘
-│
-▼
+   │
+   ▼
 [Hardware Audio Driver Output (PyAudio)]
+
+```
 
 ## 🛠️ THE TECH STACK
 
