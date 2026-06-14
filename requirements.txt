@@ -1,0 +1,17 @@
+# Target the PyTorch binaries compiled for CUDA 12.4 to match system drivers
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+# Core Machine Learning & Audio Engine Foundations
+torch
+numpy
+
+# Hardware Interface & Audio Processing
+PyAudio
+soundfile
+webrtcvad
+
+# Speech Synthesis (TTS) Pipeline
+kokoro
+
+# Local LLM Runtime Engine
+litert-lm
